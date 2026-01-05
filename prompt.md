@@ -1,4 +1,1 @@
-# Spec
-
-Describe the work you want done here.
-
+Say "hi" and then provide a short motivational quote. Keep it concise.
