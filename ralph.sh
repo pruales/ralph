@@ -40,6 +40,8 @@ Environment:
   RALPH_ROOT_DIR          Override repo root directory
   RALPH_PROMPT_FILE        Override prompt file path (default: ./prompt.md)
   RALPH_PROMPT_APPEND_FILE Append custom instructions to the base/session prompt
+  RALPH_PRD_FILE          Override PRD path injected into the prompt
+  RALPH_PROGRESS_FILE     Override progress log path injected into the prompt
   RALPH_SESSION            Default session name (same as --session)
   RALPH_SLEEP_SECONDS      Sleep between iterations (default: 10)
   RALPH_MAX_ITERATIONS    Max iterations before stopping (loop mode)
@@ -60,6 +62,8 @@ MODE="loop"
 SESSION="${RALPH_SESSION:-}"
 INIT_SESSION=""
 ITERATIONS_OVERRIDE=""
+PRD_OVERRIDE=""
+PROGRESS_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,6 +77,22 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       ITERATIONS_OVERRIDE="$2"
+      shift 2
+      ;;
+    --prd)
+      if [[ $# -lt 2 ]]; then
+        echo "--prd requires a path"
+        exit 1
+      fi
+      PRD_OVERRIDE="$2"
+      shift 2
+      ;;
+    --progress)
+      if [[ $# -lt 2 ]]; then
+        echo "--progress requires a path"
+        exit 1
+      fi
+      PROGRESS_OVERRIDE="$2"
       shift 2
       ;;
     --session)
@@ -115,7 +135,7 @@ validate_session_name() {
 
 base_prompt() {
   cat <<'BASE'
-@plans/prd.json @progress.txt \
+@PRD_FILE@ @PROGRESS_FILE@ \
 1. Find the highest-priority feature to work on and work only on that feature.
 This should be the one YOU decide has the highest priority - not necessarily the first in the list. \
 2. Check that the types check via pnpm typecheck and that the tests pass via pnpm test. \
@@ -153,6 +173,32 @@ build_prompt_file() {
     printf "\n\n# Additional Instructions\n" >> "$tmp"
     cat "$RALPH_PROMPT_APPEND_FILE" >> "$tmp"
   fi
+
+  local prd_path progress_path prd_esc progress_esc
+  if [[ -n "$PRD_OVERRIDE" ]]; then
+    prd_path="$PRD_OVERRIDE"
+  elif [[ -n "${RALPH_PRD_FILE:-}" ]]; then
+    prd_path="$RALPH_PRD_FILE"
+  elif [[ -n "$SESSION" ]]; then
+    prd_path="$SESSION_DIR/prd.json"
+  else
+    prd_path="$ROOT_DIR/plans/prd.json"
+  fi
+
+  if [[ -n "$PROGRESS_OVERRIDE" ]]; then
+    progress_path="$PROGRESS_OVERRIDE"
+  elif [[ -n "${RALPH_PROGRESS_FILE:-}" ]]; then
+    progress_path="$RALPH_PROGRESS_FILE"
+  elif [[ -n "$SESSION" ]]; then
+    progress_path="$SESSION_DIR/progress.txt"
+  else
+    progress_path="$ROOT_DIR/progress.txt"
+  fi
+
+  prd_esc="$(printf '%s' "$prd_path" | sed -e 's/[&|\\/]/\\&/g')"
+  progress_esc="$(printf '%s' "$progress_path" | sed -e 's/[&|\\/]/\\&/g')"
+  sed -e "s|@PRD_FILE@|$prd_esc|g" -e "s|@PROGRESS_FILE@|$progress_esc|g" "$tmp" > "${tmp}.new"
+  mv "${tmp}.new" "$tmp"
 
   PROMPT_FILE="$tmp"
 }
@@ -341,11 +387,17 @@ run_codex() {
 }
 
 notify_complete() {
+  local title message
+  title="Ralph"
+  message="PRD complete"
+  if [[ -n "$SESSION" ]]; then
+    message="PRD complete (session: $SESSION)"
+  fi
   if [[ "${RALPH_NOTIFY:-}" == "1" ]]; then
-    osascript -e 'display notification "PRD complete" with title "Ralph"'
+    osascript -e "display notification \"${message}\" with title \"${title}\""
   fi
   if [[ -n "${RALPH_NOTIFY_CMD:-}" ]]; then
-    bash -lc "$RALPH_NOTIFY_CMD"
+    RALPH_NOTIFY_TITLE="$title" RALPH_NOTIFY_MESSAGE="$message" bash -lc "$RALPH_NOTIFY_CMD"
   fi
 }
 
