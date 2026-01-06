@@ -1,5 +1,15 @@
 # Changelog
 
+## Version 0.2.1 (2026-01-06)
+
+### Bug Fixes
+
+- **Fixed false-positive completion detection** - `check_promise_complete()` now only searches the Transcript section of logs, avoiding false matches when the prompt instructions contain `<promise>COMPLETE</promise>`
+
+### Improvements
+
+- **Clarified task completion instructions** - Base prompt now explicitly lists all three spec updates: header emoji (⬜→✅), status line, and acceptance checkboxes
+
 ## Version 0.2.0 (2026-01-05)
 
 ### Breaking Changes

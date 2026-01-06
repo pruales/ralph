@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 resolve_root_dir() {
   if [[ -n "${RALPH_ROOT_DIR:-}" ]]; then
@@ -160,7 +160,10 @@ base_prompt() {
 1. Pick the SINGLE highest-priority incomplete task from the spec (⬜ status).
 2. Implement ONLY that task - stay focused on one feature.
 3. Run tests - only output FAILING test output (suppress passing tests to save tokens).
-4. Update spec.md to mark the task complete (change ⬜ to ✅, check [x] the boxes).
+4. Update spec.md to mark the task complete:
+   - Change `### ⬜ Task:` to `### ✅ Task:`
+   - Change `**Status:** incomplete` to `**Status:** complete`
+   - Check all acceptance boxes: `- [ ]` → `- [x]`
 5. Append a brief note to progress.txt for the next iteration.
 6. Git commit with a clear, descriptive message.
 
@@ -698,7 +701,8 @@ check_promise_complete() {
   if [[ -z "$log" || ! -f "$log" ]]; then
     return 1
   fi
-  if grep -qF "$PROMISE_PATTERN" "$log"; then
+  # Only search after ## Transcript to avoid matching prompt instructions
+  if sed -n '/^## Transcript/,$p' "$log" | grep -qF "$PROMISE_PATTERN"; then
     return 0
   fi
   return 1
