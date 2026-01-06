@@ -52,9 +52,9 @@ Environment:
   RALPH_CLAUDE_PARTIAL     If set to 1, include partial messages in stream-json
   RALPH_CLAUDE_PRETTY      If set to 1, print only the final result when using stream-json (requires jq)
   RALPH_CLAUDE_PERMISSION_MODE Claude permission mode (default: bypassPermissions)
-  RALPH_CODEX_APPROVAL    Codex approval mode (default: never)
-  RALPH_CODEX_SANDBOX     Codex sandbox mode (default: workspace-write)
-  RALPH_CODEX_YOLO        If set to 1, bypass approvals and sandbox
+  RALPH_CODEX_YOLO        Bypass approvals and sandbox (default: 1, set to 0 to disable)
+  RALPH_CODEX_APPROVAL    Codex approval mode when YOLO=0 (default: never)
+  RALPH_CODEX_SANDBOX     Codex sandbox mode when YOLO=0 (default: workspace-write)
 USAGE
 }
 
@@ -150,7 +150,7 @@ BASE
 
 build_prompt_file() {
   local tmp
-  tmp="$(mktemp "$AGENT_DIR/prompt.XXXXXX.md")"
+  tmp="$(mktemp "$AGENT_DIR/prompt.XXXXXX")"
   TEMP_PROMPT_FILE="$tmp"
 
   if [[ -n "${RALPH_PROMPT_FILE:-}" ]]; then
@@ -163,7 +163,7 @@ build_prompt_file() {
 
   if [[ -n "$SESSION" ]]; then
     local session_prompt="$SESSION_DIR/prompt.md"
-    if [[ -f "$session_prompt" && "${RALPH_PROMPT_FILE:-}" != "$session_prompt" ]]; then
+    if [[ -f "$session_prompt" ]]; then
       printf "\n\n# Session Instructions\n" >> "$tmp"
       cat "$session_prompt" >> "$tmp"
     fi
@@ -197,7 +197,8 @@ build_prompt_file() {
 
   prd_esc="$(printf '%s' "$prd_path" | sed -e 's/[&|\\/]/\\&/g')"
   progress_esc="$(printf '%s' "$progress_path" | sed -e 's/[&|\\/]/\\&/g')"
-  sed -e "s|@PRD_FILE@|$prd_esc|g" -e "s|@PROGRESS_FILE@|$progress_esc|g" "$tmp" > "${tmp}.new"
+  # Prefix paths with @ for Claude Code / Codex file reference syntax
+  sed -e "s|@PRD_FILE@|@$prd_esc|g" -e "s|@PROGRESS_FILE@|@$progress_esc|g" "$tmp" > "${tmp}.new"
   mv "${tmp}.new" "$tmp"
 
   PROMPT_FILE="$tmp"
@@ -314,10 +315,15 @@ build_prompt_file
 trap '[[ -n "${TEMP_PROMPT_FILE:-}" ]] && rm -f "$TEMP_PROMPT_FILE"' EXIT
 
 run_claude() {
-  local ts log
+  local ts log prompt_log
   ts="$(date +%Y%m%d_%H%M%S)"
   log="$LOG_DIR/claude_${ts}.log"
+  prompt_log="$LOG_DIR/claude_${ts}_prompt.md"
   LAST_LOG="$log"
+
+  # Log the built prompt for debugging
+  cp "$PROMPT_FILE" "$prompt_log"
+  echo "Prompt logged to: $prompt_log"
 
   # Uses prompt.md as the full prompt text.
   local output_format
@@ -363,23 +369,31 @@ run_claude() {
 }
 
 run_codex() {
-  local ts log
+  local ts log prompt_log
   ts="$(date +%Y%m%d_%H%M%S)"
   log="$LOG_DIR/codex_${ts}.log"
+  prompt_log="$LOG_DIR/codex_${ts}_prompt.md"
   LAST_LOG="$log"
 
+  # Log the built prompt for debugging
+  cp "$PROMPT_FILE" "$prompt_log"
+  echo "Prompt logged to: $prompt_log"
+
   # Uses prompt.md as the full prompt text (read from stdin).
-  local approval sandbox
-  approval="${RALPH_CODEX_APPROVAL:-never}"
-  sandbox="${RALPH_CODEX_SANDBOX:-workspace-write}"
+  # Default to yolo mode unless RALPH_CODEX_YOLO=0
+  local yolo
+  yolo="${RALPH_CODEX_YOLO:-1}"
 
   echo "Starting Codex run..."
   local start_ts end_ts duration
   start_ts="$(date +%s)"
-  if [[ "${RALPH_CODEX_YOLO:-}" == "1" ]]; then
-    cat "$PROMPT_FILE" | codex exec --dangerously-bypass-approvals-and-sandbox - | tee -a "$log"
+  if [[ "$yolo" == "1" ]]; then
+    cat "$PROMPT_FILE" | codex exec --yolo - | tee -a "$log"
   else
-    cat "$PROMPT_FILE" | codex exec --ask-for-approval "$approval" --sandbox "$sandbox" - | tee -a "$log"
+    local approval sandbox
+    approval="${RALPH_CODEX_APPROVAL:-never}"
+    sandbox="${RALPH_CODEX_SANDBOX:-workspace-write}"
+    cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" - | tee -a "$log"
   fi
   end_ts="$(date +%s)"
   duration=$((end_ts - start_ts))
