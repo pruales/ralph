@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+VERSION="0.1.0"
+
 resolve_root_dir() {
   if [[ -n "${RALPH_ROOT_DIR:-}" ]]; then
     echo "$RALPH_ROOT_DIR"
@@ -115,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       usage
+      exit 0
+      ;;
+    --version|-v)
+      echo "ralph $VERSION"
       exit 0
       ;;
     -*)

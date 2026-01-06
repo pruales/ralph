@@ -1,0 +1,54 @@
+name: Bump Version
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/workflows/bump-version.yml'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # Skip if commit message contains [skip ci] or was made by this action
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'chore: bump version')"
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get current version
+        id: get_version
+        run: |
+          CURRENT_VERSION=$(grep -E '^VERSION="[0-9]+\.[0-9]+\.[0-9]+"' ralph.sh | sed 's/VERSION="\(.*\)"/\1/')
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Bump patch version
+        id: bump_version
+        run: |
+          CURRENT="${{ steps.get_version.outputs.current }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+      - name: Update version in ralph.sh
+        run: |
+          sed -i 's/^VERSION="[0-9]*\.[0-9]*\.[0-9]*"/VERSION="${{ steps.bump_version.outputs.new }}"/' ralph.sh
+          echo "Updated ralph.sh to version ${{ steps.bump_version.outputs.new }}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ralph.sh
+          git commit -m "chore: bump version to ${{ steps.bump_version.outputs.new }} [skip ci]"
+          git push
