@@ -87,44 +87,56 @@ ralph init feature-x
 This creates:
 ```
 .agent/sessions/feature-x/
-├── prd.json       # Task list with acceptance criteria
+├── spec.md        # Combined: specs + task list + acceptance criteria
 ├── progress.txt   # Append-only log of work done
-└── prompt.md      # Session-specific instructions
+└── prompt.md      # Session-specific instructions and context anchors
 ```
 
 ### Edit session files
 
-**prd.json** - Define your tasks:
-```json
-[
-  {
-    "id": "add-login",
-    "title": "Add login form",
-    "description": "Users can sign in with email/password",
-    "acceptance": [
-      "Form renders on /login",
-      "Invalid credentials show error",
-      "Successful login redirects to /dashboard"
-    ],
-    "priority": "high",
-    "passes": false
-  }
-]
+**spec.md** - Combined spec and task list:
+```markdown
+# Session: Auth Flow
+
+## Overview
+Implement user authentication with email/password login.
+
+## Context & Requirements
+- JWT-based session management
+- Password must be hashed with bcrypt
+- Failed logins rate-limited after 5 attempts
+
+## Tasks
+
+### ⬜ Task: add-login-form
+**Priority:** high
+**Status:** incomplete
+
+Users can sign in with email/password.
+
+**Acceptance:**
+- [ ] Form renders on /login
+- [ ] Invalid credentials show error
+- [ ] Successful login redirects to /dashboard
+
+---
 ```
 
-**prompt.md** - Add context for the agent:
+**prompt.md** - Context anchors and instructions:
 ```markdown
-Context anchors (read before coding):
-- `specs/auth.md` (authentication requirements)
-- `src/services/auth.ts` (existing auth code)
+# Context Anchors (read these first)
+These files contain the source of truth:
+- `spec.md` - session spec with all tasks
+- `specs/auth.md` - authentication requirements
+- `src/services/auth.ts` - existing auth code
 
-Build commands:
+# Build Commands
 - TypeScript: `pnpm typecheck`
-- Tests: `pnpm test`
+- Tests: `pnpm test --bail` (only show failures)
 
-Scope:
+# Scope
 - Focus on `src/auth/` directory
-- Do not modify database schema
+- Do NOT modify database schema
 ```
 
 ### Run a session
@@ -181,12 +193,14 @@ ralph clean --session feature-x
 |----------|-------------|---------|
 | `RALPH_PROMPT_FILE` | Override base prompt file | `./prompt.md` |
 | `RALPH_PROMPT_APPEND_FILE` | Append extra instructions | (none) |
-| `RALPH_PRD_FILE` | Override PRD path | `./plans/prd.json` |
+| `RALPH_SPEC_FILE` | Override spec.md path | `./spec.md` or session spec |
 | `RALPH_PROGRESS_FILE` | Override progress path | `./progress.txt` |
 | `RALPH_SESSION` | Default session name | (none) |
 | `RALPH_SLEEP_SECONDS` | Sleep between iterations | `10` |
 | `RALPH_MAX_ITERATIONS` | Max iterations before stopping | (unlimited) |
 | `RALPH_PROMISE_PATTERN` | Completion marker | `<promise>COMPLETE</promise>` |
+| `RALPH_SUPERVISOR_SCRIPT` | Executable script to check iterations | (none) |
+| `RALPH_SUPERVISOR_NUDGE` | Nudge prompt when check fails | (none) |
 | `RALPH_NOTIFY` | macOS notification on completion | `0` |
 | `RALPH_NOTIFY_CMD` | Custom command on completion | (none) |
 | `RALPH_COMPRESS_LOGS` | Gzip logs immediately after each run | `0` |
@@ -219,7 +233,7 @@ ralph <claude|codex>                      # Run loop
 ralph --once <claude|codex>               # Single iteration
 ralph --session <name> <claude|codex>     # Run with session
 ralph --iterations <n> <claude|codex>     # Limit iterations
-ralph --prd /path/to/prd.json <cli>       # Override PRD path
+ralph --prd /path/to/spec.md <cli>        # Override spec path
 ralph --progress /path/to/progress.txt <cli>  # Override progress path
 ralph init <name>                         # Create session
 ralph list                                # List sessions
@@ -232,6 +246,167 @@ ralph clean --session <name>              # Clean session logs
 - Ralph stops when the agent outputs `<promise>COMPLETE</promise>`
 - Set `RALPH_MAX_ITERATIONS` or `--iterations <n>` to cap runs
 - Create `.agent/STOP` (or `.agent/sessions/<name>/STOP`) to stop gracefully
+
+## Supervisor Loop Pattern
+
+Ralph supports an optional supervisor pattern for checking that iterations completed expected work:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Supervisor Loop                       │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│   1. Run main Ralph iteration                          │
+│      ↓                                                  │
+│   2. Check completion via supervisor script            │
+│      ↓                                                  │
+│   3. If check fails → Run nudge iteration              │
+│      (one-off with supervisor prompt appended)         │
+│      ↓                                                  │
+│   4. Continue main loop                                │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Example use case:** Ensure translations are updated after each feature.
+
+### Setup
+
+1. **Create supervisor check script** (`.agent/sessions/myapp/supervisor.sh`):
+```bash
+#!/bin/bash
+# Check if translations were updated
+
+LOG_FILE="$1"
+
+# Parse what files were modified from the log
+if ! grep -q "i18n/translations" "$LOG_FILE"; then
+  echo "Missing: translations not updated"
+  exit 1  # Needs nudge
+fi
+
+exit 0  # All good
+```
+
+2. **Create nudge prompt** (`.agent/sessions/myapp/supervisor-nudge.md`):
+```markdown
+# Supervisor Check: Translations Missing
+
+The previous iteration completed but did not update translations.
+
+Please:
+1. Add translations to `i18n/translations/en.json` for any new UI text
+2. Verify translations are complete
+3. Commit the translation updates
+```
+
+3. **Run with supervisor:**
+```bash
+export RALPH_SUPERVISOR_SCRIPT=.agent/sessions/myapp/supervisor.sh
+export RALPH_SUPERVISOR_NUDGE=.agent/sessions/myapp/supervisor-nudge.md
+ralph --session myapp claude
+```
+
+The supervisor script examines the log after each successful iteration. If it returns non-zero, Ralph runs one additional iteration with the nudge prompt to fix the issue.
+
+## Context Window Awareness (The Smart Zone)
+
+Ralph's effectiveness depends on efficient context usage. Understanding token limits helps you stay in the "smart zone."
+
+### Token Budget
+
+- **Total context:** ~200k tokens
+- **Model overhead:** ~16k tokens
+- **Harness overhead:** ~16k tokens
+- **Usable context:** ~176k tokens (~136KB text, or 1-2 movie scripts)
+
+### Staying in the Smart Zone
+
+As the context window fills, model performance degrades. Signs you're in the "dumb zone":
+- Model forgets earlier instructions
+- Test fixing becomes scrambling/flailing
+- Repeated attempts at the same fix
+- Forgetting what task it was working on
+
+**Mitigations:**
+- **Keep each task small** - One feature = one iteration (Ralph handles this by design)
+- **Minimize test output** - Only show failing tests, not full passing logs
+- **Keep prompts concise** - Session `prompt.md` should be <100 lines
+- **Use deliberate malicking** - Explicitly mention file paths to anchor context
+
+### Test Output Optimization
+
+Most test runners output too many tokens. Configure yours to only show failures:
+
+```bash
+# Example: wrapper script that filters test output
+# .agent/test-wrapper.sh
+#!/bin/bash
+pnpm test --bail 2>&1 | grep -A10 "FAIL\|Error\|✗" || echo "All tests passed"
+```
+
+Then in your session `prompt.md`:
+```markdown
+# Build Commands
+- Tests: `./.agent/test-wrapper.sh` (only shows failures)
+```
+
+**Token savings:** A full test suite with 200 passing tests can output 50k+ tokens. Filtered output: <5k tokens.
+
+### Deliberate Malicking
+
+"Malicking" = deliberately allocating context. The first ~5k tokens of each iteration should anchor critical context:
+
+```markdown
+# Context Anchors (read these first)
+- `spec.md` - all tasks and acceptance criteria
+- `specs/api-contract.md` - API requirements
+- `src/services/auth.ts` - existing implementation
+```
+
+**Why this works:** Mentioning file paths by name triggers the model to read them at the start of iteration, ensuring they stay in the "smart zone" rather than being compressed or forgotten.
+
+## Human on the Loop (The Fireplace Pattern)
+
+Ralph works best with observation-driven tuning rather than constant intervention:
+
+### The Pattern
+
+1. **Watch like a fireplace** - Let iterations run and observe patterns
+2. **Notice behaviors** - What does it do repeatedly? What does it miss?
+3. **Tune your specs** - If it keeps making the same mistake, the spec is wrong
+4. **Never blame the model** - Garbage in = garbage out
+
+### Common Patterns
+
+| Observation | Likely Cause | Fix |
+|-------------|--------------|-----|
+| Forgets translations every time | Not in acceptance criteria | Add to task acceptance: `- [ ] Translations updated` |
+| Verbose test output causes confusion | Default test runner | Add filtered test wrapper script |
+| Repeats same fix attempt | Ambiguous spec | Make spec more specific and testable |
+| Skips certain file types | Not mentioned in context | Add to context anchors in prompt.md |
+| Works on multiple tasks per iteration | Unclear instructions | Emphasize "ONE task" in session prompt |
+
+### Iteration vs. Supervision
+
+- **Human IN the loop:** Model asks permission for each action (slow, interrupts flow)
+- **Human ON the loop:** Model runs autonomously, human observes and tunes (Ralph's design)
+
+**You are the orchestrator.** Ralph is the inner loop. You tune:
+- Task granularity (how big each task is)
+- Acceptance criteria (what "done" means)
+- Context anchors (what files to read)
+- Supervisor checks (what to verify)
+
+### Discoveries Through Observation
+
+Some patterns you might discover:
+- Opus doesn't have context window anxiety (unlike earlier models)
+- Opus can be forgetful about certain categories of work
+- Test runner output bloat is the #1 cause of context issues
+- One bad spec line = 10,000 lines of wrong code
+
+**The fireplace mindset:** Treat Ralph like a live stream you check in on. Watch for patterns, notice when behavior changes, ask yourself why—then tune the specs and prompts accordingly.
 
 ## Ralph Planner Skill
 

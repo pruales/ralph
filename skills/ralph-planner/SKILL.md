@@ -1,6 +1,6 @@
 ---
 name: ralph-planner
-description: Create or refine Ralph session plans by shaping work into a PRD JSON, initializing session files, and updating session prompt/progress without running Ralph. Use when the user asks to plan or shape work for a Ralph session, create a PRD for Ralph, or initialize a session context.
+description: Create or refine Ralph session plans by shaping work into spec.md, initializing session files, and updating session prompt/progress without running Ralph. Use when the user asks to plan or shape work for a Ralph session, create a spec for Ralph, or initialize a session context.
 ---
 
 # Ralph Planner
@@ -17,7 +17,7 @@ There are two distinct contexts at play. Confusing them causes bugs:
 | **Planner context** | You, right now | While this skill runs | Your workflow, guardrails, what commands to run/avoid |
 | **Agent context** | Ralph agent | Later, during loop execution | Instructions for completing PRD tasks |
 
-**The session files you create (`prompt.md`, `prd.json`, `progress.txt`) are read by the Ralph agent, not by you later.** Only write content relevant to that agent's task execution.
+**The session files you create (`prompt.md`, `spec.md`, `progress.txt`) are read by the Ralph agent, not by you later.** Only write content relevant to that agent's task execution.
 
 ## Workflow (Planner Context)
 
@@ -31,47 +31,68 @@ There are two distinct contexts at play. Confusing them causes bugs:
    - Session files live in `.agent/sessions/<name>/`
    - If session exists, read existing files before modifying
 
-3. **Shape the PRD**
+3. **Shape the spec**
    - Break work into small, independent tasks (one feature/fix per item)
-   - Each item must have specific, testable acceptance criteria
-   - Set `passes: false` for all items
+   - Each task must have specific, testable acceptance criteria
+   - Mark all tasks with ⬜ status (incomplete)
+   - Use checkbox format `- [ ]` for acceptance criteria
 
 4. **Write session files**
-   - Update `prd.json` with shaped tasks
+   - Update `spec.md` with shaped tasks
    - Append planning notes to `progress.txt`
-   - Update `prompt.md` with agent-relevant instructions only
+   - Update `prompt.md` with agent-relevant instructions and context anchors
 
 5. **Hand back to user**
    - Summarize what was created/updated
    - Show the command to run Ralph (but do NOT run it yourself)
 
-## PRD JSON Format
+## Spec.md Format
 
-Array of task objects. Required fields:
+Markdown file combining specs and task checklist. Tasks use this format:
 
-```json
-[
-  {
-    "id": "feature-login-form",
-    "title": "Add login form",
-    "description": "Users can sign in with email and password.",
-    "acceptance": [
-      "Form renders on /login",
-      "Invalid credentials show error",
-      "Successful login redirects to /dashboard"
-    ],
-    "priority": "high",
-    "passes": false
-  }
-]
+```markdown
+# Session: Feature Name
+
+## Overview
+High-level description of what we're building and why.
+
+## Context & Requirements
+Detailed specs, design decisions, API contracts, constraints.
+
+## Tasks
+
+### ⬜ Task: feature-login-form
+**Priority:** high
+**Status:** incomplete
+
+Users can sign in with email and password.
+
+**Acceptance:**
+- [ ] Form renders on /login
+- [ ] Invalid credentials show error
+- [ ] Successful login redirects to /dashboard
+
+**Notes:**
+Use existing AuthService, follow form patterns in /components/forms.
+
+---
+
+### ⬜ Task: another-task
+**Priority:** medium
+**Status:** incomplete
+
+...
+
+---
 ```
 
-- `id`: kebab-case identifier
-- `title`: short human-readable name
-- `description`: one sentence explaining the task
-- `acceptance`: 2-5 testable criteria
-- `priority`: `high` | `medium` | `low`
-- `passes`: always `false` (Ralph marks `true` after verification)
+**Task format:**
+- Status emoji: `⬜` (incomplete) or `✅` (complete)
+- Task ID after "Task:" (kebab-case)
+- Priority: high | medium | low
+- Status: incomplete | complete
+- Checkbox acceptance criteria `- [ ]` / `- [x]`
+- Optional notes section for implementation hints
 
 ## Session prompt.md: What to Write
 
@@ -86,24 +107,33 @@ The `prompt.md` file provides instructions to the **Ralph agent** during task ex
 
 **Example:**
 ```markdown
-Session context:
-- PRD: .agent/sessions/auth-flow/prd.json
-- Progress: .agent/sessions/auth-flow/progress.txt
+# Context Anchors (read these first)
+These files contain the source of truth for this work:
+- `spec.md` - session spec with all tasks
+- `specs/authentication.md` - auth requirements and flows
+- `src/services/auth.ts` - existing auth implementation
+- `src/hooks/useAuth.ts` - auth hook interface
 
-Context anchors (read before coding):
-- `specs/authentication.md` (auth requirements)
-- `src/services/auth.ts` (existing auth service)
-- `src/hooks/useAuth.ts` (auth hook interface)
+**Why explicit anchors work:** Mentioning file paths triggers the model to read them.
+Order matters—read specs first, then implementation files.
 
-Build commands:
-- TypeScript: `pnpm typecheck`
-- Tests: `pnpm test`
-- If iOS touched: `xcodebuild -project App.xcodeproj -scheme App build`
+# Build Commands
+- Typecheck: `pnpm typecheck`
+- Tests: `pnpm test --bail` (only show failures to save tokens)
+- iOS (if touched): `xcodebuild -project App.xcodeproj -scheme App build`
 
-Scope:
-- Focus on `src/services/` and `src/hooks/`
-- Do not modify database schema
+# Scope
+- Modify: `src/services/auth/`, `src/hooks/`
+- Do NOT touch: database migrations, CI config
+
+# Conventions
+- Use existing AuthService patterns
+- Follow form patterns in `src/components/forms/`
+- All auth errors should use AuthError type
 ```
+
+**This is "deliberate malicking"** - explicitly listing files forces the model to read them
+at the start of each iteration, keeping critical context in the "smart zone."
 
 ## Session prompt.md: What NOT to Write
 

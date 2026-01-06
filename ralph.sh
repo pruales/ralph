@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 resolve_root_dir() {
   if [[ -n "${RALPH_ROOT_DIR:-}" ]]; then
@@ -43,12 +43,14 @@ Environment:
   RALPH_ROOT_DIR          Override repo root directory
   RALPH_PROMPT_FILE        Override prompt file path (default: ./prompt.md)
   RALPH_PROMPT_APPEND_FILE Append custom instructions to the base/session prompt
-  RALPH_PRD_FILE          Override PRD path injected into the prompt
+  RALPH_SPEC_FILE         Override spec.md path injected into the prompt
   RALPH_PROGRESS_FILE     Override progress log path injected into the prompt
   RALPH_SESSION            Default session name (same as --session)
   RALPH_SLEEP_SECONDS      Sleep between iterations (default: 10)
   RALPH_MAX_ITERATIONS    Max iterations before stopping (loop mode)
   RALPH_PROMISE_PATTERN   Completion marker to stop on (default: <promise>COMPLETE</promise>)
+  RALPH_SUPERVISOR_SCRIPT  Path to executable supervisor check script
+  RALPH_SUPERVISOR_NUDGE   Path to nudge prompt when supervisor check fails
   RALPH_NOTIFY            If set to 1, send macOS notification on completion
   RALPH_NOTIFY_CMD        Optional shell command to run on completion
   RALPH_CLAUDE_OUTPUT_FORMAT Claude output format (default: stream-json)
@@ -58,6 +60,7 @@ Environment:
   RALPH_CODEX_YOLO        Bypass approvals and sandbox (default: 1, set to 0 to disable)
   RALPH_CODEX_APPROVAL    Codex approval mode when YOLO=0 (default: never)
   RALPH_CODEX_SANDBOX     Codex sandbox mode when YOLO=0 (default: workspace-write)
+  RALPH_CODEX_PRETTY      If set to 1 (default), pretty-print Codex output (requires jq)
 USAGE
 }
 
@@ -149,16 +152,23 @@ validate_session_name() {
 
 base_prompt() {
   cat <<'BASE'
-@PRD_FILE@ @PROGRESS_FILE@ \
-1. Find the highest-priority feature to work on and work only on that feature.
-This should be the one YOU decide has the highest priority - not necessarily the first in the list. \
-2. Check that the types check via pnpm typecheck and that the tests pass via pnpm test. \
-3. Update the PRD with the work that was done. \
-4. Append your progress to the progress.txt file.
-Use this to leave a note for the next person working in the codebase. \
-5. Make a git commit of that feature.
-ONLY WORK ON A SINGLE FEATURE. \
-If, while implementing the feature, you notice the PRD is complete, output <promise>COMPLETE</promise>.
+# Context (read these first - these files contain source of truth)
+@SPEC_FILE@
+@PROGRESS_FILE@
+
+# Your Task
+1. Pick the SINGLE highest-priority incomplete task from the spec (⬜ status).
+2. Implement ONLY that task - stay focused on one feature.
+3. Run tests - only output FAILING test output (suppress passing tests to save tokens).
+4. Update spec.md to mark the task complete (change ⬜ to ✅, check [x] the boxes).
+5. Append a brief note to progress.txt for the next iteration.
+6. Git commit with a clear, descriptive message.
+
+# Critical Rules
+- ONE task per iteration - stop after completing one task
+- Keep test output minimal - only show failures, not full passing logs
+- If ALL tasks in spec are ✅ complete, output <promise>COMPLETE</promise>
+- Stay in the smart zone: don't overload context with verbose logs or excessive output
 BASE
 }
 
@@ -188,15 +198,15 @@ build_prompt_file() {
     cat "$RALPH_PROMPT_APPEND_FILE" >> "$tmp"
   fi
 
-  local prd_path progress_path prd_esc progress_esc
+  local spec_path progress_path spec_esc progress_esc
   if [[ -n "$PRD_OVERRIDE" ]]; then
-    prd_path="$PRD_OVERRIDE"
-  elif [[ -n "${RALPH_PRD_FILE:-}" ]]; then
-    prd_path="$RALPH_PRD_FILE"
+    spec_path="$PRD_OVERRIDE"
+  elif [[ -n "${RALPH_SPEC_FILE:-}" ]]; then
+    spec_path="$RALPH_SPEC_FILE"
   elif [[ -n "$SESSION" ]]; then
-    prd_path="$SESSION_DIR/prd.json"
+    spec_path="$SESSION_DIR/spec.md"
   else
-    prd_path="$ROOT_DIR/plans/prd.json"
+    spec_path="$ROOT_DIR/spec.md"
   fi
 
   if [[ -n "$PROGRESS_OVERRIDE" ]]; then
@@ -209,10 +219,10 @@ build_prompt_file() {
     progress_path="$ROOT_DIR/progress.txt"
   fi
 
-  prd_esc="$(printf '%s' "$prd_path" | sed -e 's/[&|\\/]/\\&/g')"
+  spec_esc="$(printf '%s' "$spec_path" | sed -e 's/[&|\\/]/\\&/g')"
   progress_esc="$(printf '%s' "$progress_path" | sed -e 's/[&|\\/]/\\&/g')"
   # Prefix paths with @ for Claude Code / Codex file reference syntax
-  sed -e "s|@PRD_FILE@|@$prd_esc|g" -e "s|@PROGRESS_FILE@|@$progress_esc|g" "$tmp" > "${tmp}.new"
+  sed -e "s|@SPEC_FILE@|@$spec_esc|g" -e "s|@PROGRESS_FILE@|@$progress_esc|g" "$tmp" > "${tmp}.new"
   mv "${tmp}.new" "$tmp"
 
   PROMPT_FILE="$tmp"
@@ -230,34 +240,62 @@ init_session() {
   mkdir -p "$dir"
   mkdir -p "$dir/logs"
 
-  cat > "$dir/prd.json" <<'JSON'
-[
-  {
-    "id": "example-task",
-    "title": "Example feature",
-    "description": "Describe the feature or fix in one sentence.",
-    "acceptance": [
-      "List 2-5 acceptance checks",
-      "Keep each check specific and testable"
-    ],
-    "priority": "high",
-    "passes": false
-  }
-]
-JSON
+  cat > "$dir/spec.md" <<'SPEC'
+# Session: Example
+
+## Overview
+Describe what you're building and why. This section provides high-level context.
+
+## Context & Requirements
+Document key details here:
+- Architecture decisions
+- API contracts
+- Design constraints
+- External dependencies
+- Links to relevant specs or docs
+
+## Tasks
+
+### ⬜ Task: example-feature
+**Priority:** high
+**Status:** incomplete
+
+Brief description of what needs to be implemented.
+
+**Acceptance:**
+- [ ] Specific, testable criterion 1
+- [ ] Specific, testable criterion 2
+- [ ] Specific, testable criterion 3
+
+**Notes:**
+Any implementation hints or context specific to this task.
+
+---
+
+SPEC
 
   cat > "$dir/progress.txt" <<'TXT'
 Session created. Append notes here after each run.
 TXT
 
-  cat > "$dir/prompt.md" <<EOF
-Session context:
-- PRD: $dir/prd.json
-- Progress log: $dir/progress.txt
+  cat > "$dir/prompt.md" <<'PROMPT'
+# Context Anchors (read these first)
+These files contain the source of truth for this work:
+- `spec.md` - session spec with tasks and acceptance criteria
 
-Scope notes (optional):
-- Describe any special constraints for this session here.
-EOF
+# Build Commands
+- Typecheck: `pnpm typecheck` (or adjust for your project)
+- Tests: `pnpm test` (only show failures to save tokens)
+
+# Scope
+- Focus areas: describe which directories/files to modify
+- Do NOT touch: describe what to avoid (migrations, CI config, etc.)
+
+# Conventions
+- Coding style or patterns to follow
+- Naming conventions
+- Any project-specific guidelines
+PROMPT
 
   echo "Session created at: $dir"
 }
@@ -566,13 +604,35 @@ run_codex() {
   echo "Starting Codex run..."
   local start_ts end_ts duration
   start_ts="$(date +%s)"
+
+  local pretty
+  pretty="${RALPH_CODEX_PRETTY:-1}"
+  if [[ "$pretty" == "1" ]] && ! command -v jq >/dev/null 2>&1; then
+    echo "jq not found; streaming JSON will be printed. Install jq or set RALPH_CODEX_PRETTY=0."
+    pretty="0"
+  fi
+
+  local jq_filter='select(.type == "item.completed") | .item |
+    if .type == "reasoning" then "💭 " + .text
+    elif .type == "command_execution" then "$ " + .command + "\n" + .aggregated_output
+    elif .type == "message" then .content
+    else empty end'
+
   if [[ "$yolo" == "1" ]]; then
-    cat "$PROMPT_FILE" | codex exec --yolo --json -o "$summary_file" - | tee "$transcript_file"
+    if [[ "$pretty" == "1" ]]; then
+      cat "$PROMPT_FILE" | codex exec --yolo --json -o "$summary_file" - | tee "$transcript_file" | jq -r "$jq_filter"
+    else
+      cat "$PROMPT_FILE" | codex exec --yolo --json -o "$summary_file" - | tee "$transcript_file"
+    fi
   else
     local approval sandbox
     approval="${RALPH_CODEX_APPROVAL:-never}"
     sandbox="${RALPH_CODEX_SANDBOX:-workspace-write}"
-    cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" --json -o "$summary_file" - | tee "$transcript_file"
+    if [[ "$pretty" == "1" ]]; then
+      cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" --json -o "$summary_file" - | tee "$transcript_file" | jq -r "$jq_filter"
+    else
+      cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" --json -o "$summary_file" - | tee "$transcript_file"
+    fi
   fi
 
   # Show summary at end if available
@@ -590,6 +650,32 @@ run_codex() {
 
   # Compress old logs
   compress_old_logs "$LOG_DIR"
+}
+
+run_supervisor() {
+  # Optional supervisor check after each iteration
+  # Script should examine the log and return:
+  #   0 = all good
+  #   1 = needs nudge (run one-off iteration with supervisor prompt)
+  local script="${RALPH_SUPERVISOR_SCRIPT:-}"
+  if [[ -z "$script" || ! -x "$script" ]]; then
+    return 0
+  fi
+  
+  echo "Running supervisor check..."
+  if ! "$script" "$LAST_LOG"; then
+    echo "Supervisor check failed - running nudge iteration"
+    local nudge_prompt="${RALPH_SUPERVISOR_NUDGE:-}"
+    if [[ -n "$nudge_prompt" && -f "$nudge_prompt" ]]; then
+      # Run one-off iteration with nudge prompt appended
+      local old_append="${RALPH_PROMPT_APPEND_FILE:-}"
+      export RALPH_PROMPT_APPEND_FILE="$nudge_prompt"
+      "$0" --once "$CLI"
+      export RALPH_PROMPT_APPEND_FILE="$old_append"
+    else
+      echo "Warning: RALPH_SUPERVISOR_NUDGE not set or file not found"
+    fi
+  fi
 }
 
 notify_complete() {
@@ -684,6 +770,9 @@ while :; do
     break
   elif [[ "$status" -ne 0 ]]; then
     echo "Iteration failed"
+  else
+    # Run supervisor check only on successful iterations
+    run_supervisor
   fi
 
   if [[ -f "$STOP_FILE" ]]; then
