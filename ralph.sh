@@ -35,6 +35,7 @@ Usage:
   ./ralph.sh --init-session <name>      Create a new session scaffold
   ./ralph.sh init <name>                Create a new session scaffold
   ./ralph.sh list                       List existing sessions
+  ./ralph.sh clean [--session <name>]   Clean up logs (remove empty, compress old)
 
 Environment:
   RALPH_ROOT_DIR          Override repo root directory
@@ -65,6 +66,7 @@ ITERATIONS_OVERRIDE=""
 PRD_OVERRIDE=""
 PROGRESS_OVERRIDE=""
 
+POSITIONAL_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --once)
@@ -115,11 +117,17 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
+    -*)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
     *)
-      break
+      POSITIONAL_ARGS+=("$1")
+      shift
       ;;
   esac
 done
+set -- "${POSITIONAL_ARGS[@]}"
 
 validate_session_name() {
   local name="$1"
@@ -268,6 +276,152 @@ list_sessions() {
   fi
 }
 
+# Log management functions
+
+prompt_hash() {
+  # Compute hash of prompt file for deduplication
+  local file="$1"
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$file" | cut -d' ' -f1
+  elif command -v md5 >/dev/null 2>&1; then
+    md5 -q "$file"
+  else
+    # Fallback: use file size + first/last lines
+    wc -c < "$file" | tr -d ' '
+  fi
+}
+
+prompt_changed() {
+  # Check if prompt differs from last run
+  local prompt_file="$1"
+  local log_dir="$2"
+  local hash_file="$log_dir/.last_prompt_hash"
+
+  local current_hash
+  current_hash="$(prompt_hash "$prompt_file")"
+
+  if [[ -f "$hash_file" ]]; then
+    local last_hash
+    last_hash="$(cat "$hash_file")"
+    if [[ "$current_hash" == "$last_hash" ]]; then
+      return 1  # Not changed
+    fi
+  fi
+
+  # Save current hash
+  echo "$current_hash" > "$hash_file"
+  return 0  # Changed
+}
+
+finalize_run_log() {
+  # Combine prompt, transcript, and summary into single markdown file
+  local cli="$1"
+  local ts="$2"
+  local log_dir="$3"
+  local prompt_file="$4"
+  local transcript_file="$5"
+  local summary_file="${6:-}"
+
+  local combined="$log_dir/${cli}_${ts}.md"
+  local prompt_changed_flag="$7"
+
+  {
+    echo "# Ralph Run: $cli"
+    echo ""
+    echo "**Timestamp:** $(date -r "${transcript_file}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+
+    # Include prompt only if changed
+    if [[ "$prompt_changed_flag" == "1" ]]; then
+      echo "## Prompt"
+      echo ""
+      echo '```markdown'
+      cat "$prompt_file"
+      echo '```'
+      echo ""
+    else
+      echo "## Prompt"
+      echo ""
+      echo "*Unchanged from previous run*"
+      echo ""
+    fi
+
+    echo "## Transcript"
+    echo ""
+    if [[ -s "$transcript_file" ]]; then
+      echo '```json'
+      cat "$transcript_file"
+      echo '```'
+    else
+      echo "*No output captured*"
+    fi
+    echo ""
+
+    # Include summary if available
+    if [[ -n "$summary_file" && -f "$summary_file" && -s "$summary_file" ]]; then
+      echo "## Summary"
+      echo ""
+      cat "$summary_file"
+      echo ""
+    fi
+  } > "$combined"
+
+  # Remove individual files
+  rm -f "$transcript_file"
+  [[ -n "$summary_file" && -f "$summary_file" ]] && rm -f "$summary_file"
+
+  # Compress immediately if RALPH_COMPRESS_LOGS=1
+  if [[ "${RALPH_COMPRESS_LOGS:-0}" == "1" ]]; then
+    gzip "$combined"
+    echo "Log saved to: ${combined}.gz"
+  else
+    echo "Log saved to: $combined"
+  fi
+}
+
+compress_old_logs() {
+  # Compress logs older than 1 day
+  local log_dir="$1"
+  local count=0
+
+  while IFS= read -r -d '' file; do
+    gzip "$file" 2>/dev/null && ((count++)) || true
+  done < <(find "$log_dir" -name "*.md" -type f -mtime +1 -print0 2>/dev/null)
+
+  if [[ "$count" -gt 0 ]]; then
+    echo "Compressed $count old log(s)"
+  fi
+}
+
+clean_logs() {
+  # Clean up logs: remove empty files, compress old logs
+  local log_dir="$1"
+  local empty_count=0
+  local compress_count=0
+
+  if [[ ! -d "$log_dir" ]]; then
+    echo "Log directory not found: $log_dir"
+    return 1
+  fi
+
+  # Remove empty files
+  while IFS= read -r -d '' file; do
+    rm -f "$file" && ((empty_count++)) || true
+  done < <(find "$log_dir" -type f -empty -print0 2>/dev/null)
+
+  # Compress uncompressed logs older than 1 day
+  while IFS= read -r -d '' file; do
+    gzip "$file" 2>/dev/null && ((compress_count++)) || true
+  done < <(find "$log_dir" -name "*.md" -type f -mtime +1 -print0 2>/dev/null)
+
+  # Also compress old .log files (legacy format)
+  while IFS= read -r -d '' file; do
+    gzip "$file" 2>/dev/null && ((compress_count++)) || true
+  done < <(find "$log_dir" -name "*.log" -type f -mtime +1 -print0 2>/dev/null)
+
+  echo "Cleaned: removed $empty_count empty file(s), compressed $compress_count old log(s)"
+}
+
 if [[ -n "$INIT_SESSION" ]]; then
   init_session "$INIT_SESSION"
   exit 0
@@ -285,6 +439,16 @@ fi
 
 if [[ "$CLI" == "list" ]]; then
   list_sessions
+  exit 0
+fi
+
+if [[ "$CLI" == "clean" ]]; then
+  # Determine which log directory to clean
+  clean_dir="$AGENT_DIR/logs"
+  if [[ -n "$SESSION" ]]; then
+    clean_dir="$AGENT_DIR/sessions/$SESSION/logs"
+  fi
+  clean_logs "$clean_dir"
   exit 0
 fi
 
@@ -315,15 +479,16 @@ build_prompt_file
 trap '[[ -n "${TEMP_PROMPT_FILE:-}" ]] && rm -f "$TEMP_PROMPT_FILE"' EXIT
 
 run_claude() {
-  local ts log prompt_log
+  local ts transcript_file
   ts="$(date +%Y%m%d_%H%M%S)"
-  log="$LOG_DIR/claude_${ts}.log"
-  prompt_log="$LOG_DIR/claude_${ts}_prompt.md"
-  LAST_LOG="$log"
+  transcript_file="$LOG_DIR/.claude_${ts}_transcript.json"
+  LAST_LOG="$LOG_DIR/claude_${ts}.md"
 
-  # Log the built prompt for debugging
-  cp "$PROMPT_FILE" "$prompt_log"
-  echo "Prompt logged to: $prompt_log"
+  # Check if prompt changed
+  local prompt_changed_flag="0"
+  if prompt_changed "$PROMPT_FILE" "$LOG_DIR"; then
+    prompt_changed_flag="1"
+  fi
 
   # Uses prompt.md as the full prompt text.
   local output_format
@@ -352,32 +517,40 @@ run_claude() {
 
   if [[ "$output_format" == "stream-json" && "${RALPH_CLAUDE_PARTIAL:-}" == "1" ]]; then
     if [[ "$pretty" == "1" ]]; then
-      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" --include-partial-messages "$(cat "$PROMPT_FILE")" | tee -a "$log" | jq -r 'select(.type=="result") | .result'
+      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" --include-partial-messages "$(cat "$PROMPT_FILE")" | tee "$transcript_file" | jq -r 'select(.type=="result") | .result'
     else
-      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" --include-partial-messages "$(cat "$PROMPT_FILE")" | tee -a "$log"
+      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" --include-partial-messages "$(cat "$PROMPT_FILE")" | tee "$transcript_file"
     fi
   else
     if [[ "$pretty" == "1" ]]; then
-      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" "$(cat "$PROMPT_FILE")" | tee -a "$log" | jq -r 'select(.type=="result") | .result'
+      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" "$(cat "$PROMPT_FILE")" | tee "$transcript_file" | jq -r 'select(.type=="result") | .result'
     else
-      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" "$(cat "$PROMPT_FILE")" | tee -a "$log"
+      claude -p $verbose_flag --permission-mode "$permission_mode" --output-format "$output_format" "$(cat "$PROMPT_FILE")" | tee "$transcript_file"
     fi
   fi
   end_ts="$(date +%s)"
   duration=$((end_ts - start_ts))
   echo "Finished Claude run in ${duration}s."
+
+  # Combine into single file
+  finalize_run_log "claude" "$ts" "$LOG_DIR" "$PROMPT_FILE" "$transcript_file" "" "$prompt_changed_flag"
+
+  # Compress old logs
+  compress_old_logs "$LOG_DIR"
 }
 
 run_codex() {
-  local ts log prompt_log
+  local ts transcript_file summary_file
   ts="$(date +%Y%m%d_%H%M%S)"
-  log="$LOG_DIR/codex_${ts}.log"
-  prompt_log="$LOG_DIR/codex_${ts}_prompt.md"
-  LAST_LOG="$log"
+  transcript_file="$LOG_DIR/.codex_${ts}_transcript.jsonl"
+  summary_file="$LOG_DIR/.codex_${ts}_summary.md"
+  LAST_LOG="$LOG_DIR/codex_${ts}.md"
 
-  # Log the built prompt for debugging
-  cp "$PROMPT_FILE" "$prompt_log"
-  echo "Prompt logged to: $prompt_log"
+  # Check if prompt changed
+  local prompt_changed_flag="0"
+  if prompt_changed "$PROMPT_FILE" "$LOG_DIR"; then
+    prompt_changed_flag="1"
+  fi
 
   # Uses prompt.md as the full prompt text (read from stdin).
   # Default to yolo mode unless RALPH_CODEX_YOLO=0
@@ -388,16 +561,29 @@ run_codex() {
   local start_ts end_ts duration
   start_ts="$(date +%s)"
   if [[ "$yolo" == "1" ]]; then
-    cat "$PROMPT_FILE" | codex exec --yolo - | tee -a "$log"
+    cat "$PROMPT_FILE" | codex exec --yolo --json -o "$summary_file" - | tee "$transcript_file"
   else
     local approval sandbox
     approval="${RALPH_CODEX_APPROVAL:-never}"
     sandbox="${RALPH_CODEX_SANDBOX:-workspace-write}"
-    cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" - | tee -a "$log"
+    cat "$PROMPT_FILE" | codex -a "$approval" exec --sandbox "$sandbox" --json -o "$summary_file" - | tee "$transcript_file"
+  fi
+
+  # Show summary at end if available
+  if [[ -f "$summary_file" && -s "$summary_file" ]]; then
+    echo ""
+    echo "=== Summary ==="
+    cat "$summary_file"
   fi
   end_ts="$(date +%s)"
   duration=$((end_ts - start_ts))
   echo "Finished Codex run in ${duration}s."
+
+  # Combine into single file
+  finalize_run_log "codex" "$ts" "$LOG_DIR" "$PROMPT_FILE" "$transcript_file" "$summary_file" "$prompt_changed_flag"
+
+  # Compress old logs
+  compress_old_logs "$LOG_DIR"
 }
 
 notify_complete() {

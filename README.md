@@ -147,16 +147,33 @@ ralph --session feature-x --once claude
 ralph list
 ```
 
-## Debugging
+## Logging
 
-Each run logs the built prompt for verification:
+Each run creates a single combined markdown file:
 
 ```
-.agent/logs/claude_20260105_120000_prompt.md   # What was sent to the agent
-.agent/logs/claude_20260105_120000.log         # Agent output
+.agent/logs/claude_20260105_120000.md
 ```
+
+The file contains:
+- **Prompt** (only if changed from previous run)
+- **Transcript** (full JSON stream of all tool calls and responses)
+- **Summary** (for Codex runs)
 
 For sessions, logs go to `.agent/sessions/<name>/logs/`.
+
+**Log management:**
+- Prompts are deduplicated (only saved when changed)
+- Old logs (>1 day) are automatically compressed with gzip
+- Use `ralph clean` to manually clean up
+
+```bash
+# Clean logs in default directory
+ralph clean
+
+# Clean logs for a specific session
+ralph clean --session feature-x
+```
 
 ## Environment Variables
 
@@ -172,6 +189,7 @@ For sessions, logs go to `.agent/sessions/<name>/logs/`.
 | `RALPH_PROMISE_PATTERN` | Completion marker | `<promise>COMPLETE</promise>` |
 | `RALPH_NOTIFY` | macOS notification on completion | `0` |
 | `RALPH_NOTIFY_CMD` | Custom command on completion | (none) |
+| `RALPH_COMPRESS_LOGS` | Gzip logs immediately after each run | `0` |
 
 ### Claude-specific
 
@@ -205,6 +223,8 @@ ralph --prd /path/to/prd.json <cli>       # Override PRD path
 ralph --progress /path/to/progress.txt <cli>  # Override progress path
 ralph init <name>                         # Create session
 ralph list                                # List sessions
+ralph clean                               # Clean logs (remove empty, compress old)
+ralph clean --session <name>              # Clean session logs
 ```
 
 ## Completion and Limits
